@@ -22,6 +22,7 @@ import { inflateSync, deflateSync } from 'node:zlib';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
+import { esc, notFoundPage, sharePage } from './server/ui.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 8910);
@@ -618,7 +619,7 @@ const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; cha
 async function serveStatic(req, res) {
   const { stat } = await import('node:fs/promises');
   let p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
-  if (p.endsWith('/')) p += 'index.html';
+  if (p === '/') p = '/index.html';
   const file = path.normalize(path.join(DIST, p));
   if (!file.startsWith(DIST)) {
     res.writeHead(403);
@@ -632,14 +633,10 @@ async function serveStatic(req, res) {
     res.writeHead(200, { 'content-type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream' });
     res.end(data);
   } catch {
-    try {
-      const data = await readFile(path.join(DIST, 'index.html'));
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-      res.end(data);
-    } catch {
-      res.writeHead(404);
-      res.end('not found');
-    }
+    const html = notFoundPage(p);
+    const body = Buffer.from(html, 'utf8');
+    res.writeHead(404, { 'content-type': 'text/html; charset=utf-8', 'content-length': body.length, 'cache-control': 'no-store' });
+    res.end(body);
   }
 }
 
@@ -688,254 +685,39 @@ const server = createServer(async (req, res) => {
       send(res, 200, { id: r.rows[0].id, status: r.rows[0].status, note: r.rows[0].note, error: r.rows[0].error, created_at: r.rows[0].created_at, stages });
       return;
     }
-    // ---- share page: /r/<id> and /share/<id> — 100% independent replay page (not the SPA) ----
+    // ---- share page: /r/<id> and /share/<id> — independent replay, same chrome as SPA ----
     const mSharePage = url.pathname.match(/^\/(?:r|share)\/([A-Za-z0-9]+)$/);
     if (mSharePage && req.method === 'GET') {
       const id = mSharePage[1];
-      const esc = (s) => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
-      let note = ''; let status = ''; let createdAt = '';
+      let note = ''; let status = '';
       try {
-        const r = await pool.query('SELECT note, status, created_at FROM runs WHERE id=$1', [id]);
-        if (r.rows.length) { note = r.rows[0].note || ''; status = r.rows[0].status || ''; createdAt = r.rows[0].created_at ? new Date(r.rows[0].created_at).toISOString() : ''; }
-      } catch {}
+        const r = await pool.query('SELECT note, status FROM runs WHERE id=$1', [id]);
+        if (!r.rows.length) {
+          const html = notFoundPage(`/r/${id}`);
+          const body = Buffer.from(html, 'utf8');
+          res.writeHead(404, { 'content-type': 'text/html; charset=utf-8', 'content-length': body.length, 'cache-control': 'no-store' });
+          res.end(body);
+          return;
+        }
+        note = r.rows[0].note || '';
+        status = r.rows[0].status || '';
+      } catch {
+        const html = notFoundPage(`/r/${id}`);
+        const body = Buffer.from(html, 'utf8');
+        res.writeHead(500, { 'content-type': 'text/html; charset=utf-8', 'content-length': body.length, 'cache-control': 'no-store' });
+        res.end(body);
+        return;
+      }
       const host = req.headers.host || 'draw.corklab.xyz';
-      const origin = `https://${host}`;
+      const proto = (req.headers['x-forwarded-proto'] || 'https').toString().split(',')[0].trim();
+      const origin = `${proto}://${host}`;
       const imgUrl = `${origin}/p/${id}.png`;
-      const apiUrl = `${origin}/api/r/${id}`;
-      const title = note ? `${esc(note.slice(0,80))} — Drawing Agents` : `Drawing ${esc(id)} — Drawing Agents`;
-      const desc = note ? esc(note.slice(0,160)) : `Agent-drawn canvas — watch the pen replay ${esc(id)} (${esc(status || 'drawing')}).`;
+      const title = note ? `${esc(note.slice(0, 80))} — Drawing Agents` : `Drawing ${esc(id)} — Drawing Agents`;
+      const desc = note
+        ? esc(note.slice(0, 160))
+        : `Agent-drawn canvas — watch the pen replay ${esc(id)} (${esc(status || 'drawing')}).`;
       const og = `<meta property="og:type" content="website"/><meta property="og:title" content="${title}"/><meta property="og:description" content="${desc}"/><meta property="og:image" content="${imgUrl}"/><meta property="og:image:width" content="960"/><meta property="og:image:height" content="600"/><meta property="og:url" content="${origin}/r/${esc(id)}"/><meta name="twitter:card" content="summary_large_image"/><meta name="twitter:title" content="${title}"/><meta name="twitter:description" content="${desc}"/><meta name="twitter:image" content="${imgUrl}"/><link rel="canonical" href="${origin}/r/${esc(id)}"/>`;
-      // Independent HTML: no SPA, canvas replays 100% on its own. Inline style+script so it works
-      // even if the Vite bundle changes. Responsive: canvas is 100% width, aspect 960/600, never cropped.
-      const html = `<!doctype html>
-<html lang="id">
-<head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>${title}</title>
-${og}
-<style>
-*{box-sizing:border-box}html,body{margin:0;padding:0}
-body{background:#f8f8f7;color:#1f1f1f;font-family:Inter,system-ui,Segoe UI,Roboto,sans-serif;-webkit-font-smoothing:antialiased}
-a{color:#145378}
-.govbar{background:#141414;color:#fff}
-.govbar__inner{max-width:960px;margin:0 auto;padding:12px 20px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-.govbar__mark{width:34px;height:34px;border-radius:8px;background:#c8102e;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;flex-shrink:0}
-.govbar__title{font-size:1rem;font-weight:600;margin:0;line-height:1.2}
-.govbar__sub{font-size:.75rem;opacity:.72;margin:1px 0 0}
-.page{max-width:960px;margin:0 auto;padding:20px 20px 40px;width:100%;overflow-x:clip}
-.card{background:#fff;border:1px solid #e5e5e5;border-radius:12px;padding:20px;display:flex;flex-direction:column;gap:12px;width:100%;min-width:0}
-.card__title{font-size:1.05rem;font-weight:600;margin:0;display:flex;align-items:center;gap:8px;flex-wrap:wrap;overflow-wrap:anywhere}
-.meta{font-size:.84rem;color:#525252;line-height:1.5;overflow-wrap:break-word}
-.badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:.72rem;font-weight:600;letter-spacing:.03em;text-transform:uppercase;background:#f3f4f6;color:#374151}
-.badge--done{background:#dcfce7;color:#166534}
-.badge--error{background:#fee2e2;color:#991b1b}
-.badge--running{background:#fef3c7;color:#92400e}
-.stage{font-size:.85rem;color:#525252;min-height:22px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.dot{width:9px;height:9px;border-radius:50%;background:#9ca3af;flex-shrink:0}
-.dot.ok{background:#4ce160}
-.spin{width:16px;height:16px;border:2px solid #e5e7eb;border-top-color:#146190;border-radius:50%;animation:sp .7s linear infinite}
-@keyframes sp{to{transform:rotate(360deg)}}
-canvas.replay{width:100%;max-width:100%;aspect-ratio:960/600;height:auto;display:block;background:#fff;border:1px solid #e5e5e5;border-radius:10px}
-canvas.replay.active{border-color:#146190;box-shadow:0 0 0 3px rgba(20,97,144,.12)}
-.actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-.btn{appearance:none;border:1px solid #e5e5e5;background:#fff;color:#1f1f1f;border-radius:999px;padding:8px 14px;font-size:.86rem;font-weight:500;cursor:pointer;font-family:inherit}
-.btn:disabled{opacity:.5;cursor:default}
-.btn--primary{background:#141414;color:#fff;border-color:#141414}
-.btn--primary:disabled{opacity:.6}
-.hint{font-size:.8rem;color:#737373;line-height:1.5;overflow-wrap:break-word}
-.err{background:#fef2f2;border:1px solid #fecaca;color:#991b1b;border-radius:10px;padding:10px 12px;font-size:.86rem;overflow-wrap:break-word}
-.sharebar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:.84rem}
-.sharebar input{flex:1 1 220px;min-width:0;padding:8px 10px;border:1px solid #e5e5e5;border-radius:8px;font-size:.84rem}
-.footer{max-width:960px;margin:8px auto 0;padding:16px 20px;font-size:.78rem;color:#737373;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
-@media(max-width:640px){.page{padding:14px 12px 28px}.card{padding:14px}.govbar__sub{display:none}.actions .btn{flex:1 1 auto}}
-</style>
-</head>
-<body>
-<div class="govbar"><div class="govbar__inner"><div class="govbar__mark">IA</div><div><p class="govbar__title">Drawing Agents</p><p class="govbar__sub">Tautan berbagi · pemutaran independen 100%</p></div></div></div>
-<main class="page">
-  <div class="card" id="card">
-    <h1 class="card__title">Gambar berbagi <span class="badge" id="badge">${esc(status || 'memuat…')}</span> <span style="font-weight:400;font-size:.84rem;color:#6b7280" id="rid">${esc(id)}</span></h1>
-    <div class="meta" id="promptLine" style="display:none"></div>
-    <div class="stage" id="stage"><span class="spin"></span><span id="stageText">Memuat gambar…</span></div>
-    <canvas id="cv" class="replay" width="960" height="600" aria-label="replay canvas"></canvas>
-    <div class="actions">
-      <button class="btn btn--primary" id="btnReplay" disabled>Putar ulang</button>
-      <button class="btn" id="btnPause" disabled>Jeda</button>
-      <button class="btn" id="btnDownload" disabled>Unduh PNG</button>
-      <a class="btn" href="/" style="text-decoration:none;display:inline-flex;align-items:center;justify-content:center">Buka kanvas</a>
-    </div>
-    <div class="sharebar">
-      <input id="shareInput" readonly value="${esc(origin)}/r/${esc(id)}" aria-label="share link"/>
-      <button class="btn" id="btnCopy">Salin tautan</button>
-    </div>
-    <p class="hint">Halaman ini independen 100% — hanya memutar ulang goresan agen pena demi pena. Tidak perlu login. Setelah selesai, kanvas menampilkan hasil akhir yang identik dengan pratinjau tersimpan.</p>
-    <div id="err" class="err" style="display:none"></div>
-  </div>
-</main>
-<div class="footer"><span>Drawing Agents · INA Digital</span><span><a href="/">draw.corklab.xyz</a></span></div>
-<script>
-(function(){
-  const CANVAS_W=960,CANVAS_H=600;
-  const id=${JSON.stringify(id)};
-  const cv=document.getElementById('cv');
-  const ctx=cv.getContext('2d');
-  const stageText=document.getElementById('stageText');
-  const badge=document.getElementById('badge');
-  const errBox=document.getElementById('err');
-  const btnReplay=document.getElementById('btnReplay');
-  const btnPause=document.getElementById('btnPause');
-  const btnDownload=document.getElementById('btnDownload');
-  const btnCopy=document.getElementById('btnCopy');
-  const shareInput=document.getElementById('shareInput');
-  const promptLine=document.getElementById('promptLine');
-  let plan=null, imageReady=false;
-
-  function esc2(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML}
-  function setStage(t, spin){stageText.textContent=t; var s=document.querySelector('#stage .spin'); if(s) s.style.display = spin ? '' : 'none';}
-  function setBadge(s){badge.textContent=s; badge.className='badge '+(s==='done'?'badge--done':s==='error'?'badge--error':(s==='running'||s==='rendering')?'badge--running':'');}
-  function showErr(m){errBox.textContent=m; errBox.style.display='';}
-  function clear(){ctx.fillStyle='#ffffff';ctx.fillRect(0,0,CANVAS_W,CANVAS_H)}
-  function strokeSegments(s){
-    if(s.type==='line') return s.points.map(function(p){return Array.isArray(p)?{x:p[0],y:p[1]}:{x:p.x,y:p.y}});
-    if(s.type==='circle'){var pts=[], steps=Math.max(12,Math.round((s.r*2*Math.PI)/9)); for(var i=0;i<=steps;i++){var a=(i/steps)*Math.PI*2; pts.push({x:s.cx+Math.cos(a)*s.r,y:s.cy+Math.sin(a)*s.r})} return pts}
-    if(s.type==='rect') return [{x:s.x,y:s.y},{x:s.x+s.w,y:s.y},{x:s.x+s.w,y:s.y+s.h},{x:s.x,y:s.y+s.h},{x:s.x,y:s.y}];
-    if(s.type==='text') return [{x:s.x,y:s.y}];
-    return [];
-  }
-  function drawStrokeFull(s){
-    ctx.strokeStyle=s.color; ctx.fillStyle=s.color; ctx.lineWidth=s.width||3; ctx.lineCap='round'; ctx.lineJoin='round';
-    if(s.type==='line'){ctx.beginPath();ctx.moveTo(s.points[0][0],s.points[0][1]);for(var i=0;i<s.points.length;i++)ctx.lineTo(s.points[i][0],s.points[i][1]);ctx.stroke()}
-    else if(s.type==='circle'){ctx.beginPath();ctx.arc(s.cx,s.cy,s.r,0,Math.PI*2); if(s.fill) ctx.fill(); else ctx.stroke()}
-    else if(s.type==='rect'){ctx.beginPath();ctx.rect(s.x,s.y,s.w,s.h); if(s.fill) ctx.fill(); else ctx.stroke()}
-    else if(s.type==='text'){ctx.font=(s.size||24)+'px system-ui,sans-serif'; ctx.fillText(s.text,s.x,s.y)}
-  }
-  function drawStrokePartial(s,pts,f){
-    ctx.strokeStyle=s.color; ctx.lineWidth=s.width||3; ctx.lineCap='round'; ctx.lineJoin='round';
-    if(!pts.length) return;
-    if(s.type==='text'){ctx.fillStyle=s.color; ctx.font=(s.size||24)+'px system-ui,sans-serif'; ctx.fillText(s.text.slice(0,Math.round(s.text.length*f)),s.x,s.y); return}
-    var n=Math.max(1,Math.round(pts.length*f)); if(n<2) return;
-    ctx.beginPath(); ctx.moveTo(pts[0].x,pts[0].y); for(var i=1;i<n;i++) ctx.lineTo(pts[i].x,pts[i].y); ctx.stroke();
-  }
-  function finalizeStroke(s){
-    if(s.type==='circle'||s.type==='rect'){
-      ctx.strokeStyle=s.color; ctx.fillStyle=s.color; ctx.lineWidth=s.width||3; ctx.lineCap='round'; ctx.lineJoin='round';
-      ctx.beginPath(); if(s.type==='circle') ctx.arc(s.cx,s.cy,s.r,0,Math.PI*2); else ctx.rect(s.x,s.y,s.w,s.h);
-      if(s.fill) ctx.fill(); else ctx.stroke();
-    }
-  }
-  function renderPlanFull(pl){ clear(); for(var i=0;i<pl.strokes.length;i++) drawStrokeFull(pl.strokes[i]); }
-
-  var replaying=false, paused=false, strokeIdx=0, live=null, timer=null, lastT=0, done=false;
-
-  function updateProgress(f){ setStage('Menggambar… '+Math.round(f*100)+'%', true); }
-  function startReplay(){
-    if(!plan) return;
-    cancelAnimationFrame(timer);
-    replaying=true; paused=false; strokeIdx=0; live=null; done=false;
-    btnReplay.disabled=true; btnPause.disabled=false; btnPause.textContent='Jeda';
-    cv.classList.add('active');
-    clear(); setStage('Menggambar… 0%', true); setBadge('running');
-    lastT=performance.now();
-    timer=requestAnimationFrame(frame);
-  }
-  function frame(ts){
-    if(!replaying) return;
-    if(paused){ lastT=ts; timer=requestAnimationFrame(frame); return; }
-    var strokes=plan.strokes;
-    if(!live){
-      while(strokeIdx<strokes.length){
-        var s=strokes[strokeIdx]; var pts=strokeSegments(s);
-        if(pts.length){ live={s:s,pts:pts,i:0,t:0}; break; }
-        strokeIdx++;
-      }
-      if(!live){ finish(true); return; }
-    }
-    var dt=Math.min(50, ts-lastT); lastT=ts; live.t+=dt;
-    var dur=Math.min(2200, Math.max(350, live.pts.length*12));
-    var f=Math.min(1, live.t/dur);
-    var headF=Math.min(1, f+0.12);
-    if(live.s.type==='line'||live.s.type==='circle'||live.s.type==='rect'){
-      drawStrokePartial(live.s, live.pts, f);
-      var n=Math.max(1, Math.round(live.pts.length*headF));
-      if(n < live.pts.length){
-        var tip=live.pts[Math.min(live.pts.length-1,n)];
-        ctx.fillStyle=live.s.color; ctx.beginPath(); ctx.arc(tip.x,tip.y, Math.max(2.5,(live.s.width||3)*0.9),0,Math.PI*2); ctx.fill();
-      }
-    } else if(live.s.type==='text'){
-      ctx.fillStyle=live.s.color; ctx.font=(live.s.size||24)+'px system-ui,sans-serif';
-      ctx.fillText(live.s.text.slice(0, Math.round(live.s.text.length*f)), live.s.x, live.s.y);
-    }
-    if(f>=1){
-      finalizeStroke(live.s);
-      strokeIdx++; live=null;
-      updateProgress(strokeIdx/strokes.length);
-    }
-    timer=requestAnimationFrame(frame);
-  }
-  function stop(){ cancelAnimationFrame(timer); replaying=false; paused=false; live=null; cv.classList.remove('active'); }
-  async function finish(ok){
-    done=true; replaying=false; live=null; cancelAnimationFrame(timer); timer=null;
-    cv.classList.remove('active');
-    if(ok && plan){
-      try{ renderPlanFull(plan); }catch(e){}
-      // snap to the exact stored PNG so finished canvas === saved preview (100% page guarantee)
-      try{
-        var img=new Image(); img.decoding='sync'; img.src='/p/'+id+'.png?'+Date.now();
-        await img.decode();
-        clear(); ctx.drawImage(img,0,0,CANVAS_W,CANVAS_H);
-        setStage('Selesai — menampilkan pratinjau tersimpan yang identik.', false);
-      }catch(e){
-        setStage('Selesai — menampilkan hasil render penuh.', false);
-      }
-      setBadge('done');
-      btnReplay.disabled=false; btnPause.disabled=true; btnPause.textContent='Jeda';
-      btnDownload.disabled=false; imageReady=true;
-    } else {
-      setStage('Replay dihentikan.', false);
-      btnReplay.disabled=false; btnPause.disabled=true;
-    }
-  }
-
-  btnReplay.addEventListener('click', startReplay);
-  btnPause.addEventListener('click', function(){
-    if(!replaying || done) return;
-    paused=!paused; btnPause.textContent = paused ? 'Lanjut' : 'Jeda';
-    setStage(paused ? 'Dijeda — klik Lanjut' : 'Menggambar…', !paused);
-  });
-  btnDownload.addEventListener('click', function(){
-    var a=document.createElement('a'); a.href=cv.toDataURL('image/png'); a.download='drawing-'+id+'.png'; a.click();
-  });
-  btnCopy.addEventListener('click', async function(){
-    try{ await navigator.clipboard.writeText(shareInput.value); btnCopy.textContent='Tersalin!'; setTimeout(function(){btnCopy.textContent='Salin tautan'},1500);}catch(e){ shareInput.select(); document.execCommand('copy');}
-  });
-  shareInput.addEventListener('click', function(){ this.select(); });
-
-  clear();
-  // load plan — public endpoint, no key
-  fetch('/api/r/'+id).then(function(r){
-    if(!r.ok) throw new Error('Gambar tidak ditemukan ('+r.status+') — tautan salah atau sudah dihapus.');
-    return r.json();
-  }).then(function(j){
-    if(j.note){ promptLine.textContent='Perintah: '+j.note; promptLine.style.display=''; document.title = j.note.slice(0,80)+' — Drawing Agents'; }
-    setBadge(j.status||'');
-    var ds=(j.stages||[]).find(function(s){return s.key==='draw'});
-    if(!ds || !ds.plan || !ds.plan.strokes){ throw new Error('Run ini tidak punya rencana goresan yang bisa diputar ulang. Status: '+(j.status||'')); }
-    if(j.status==='error'){ showErr('Run ini gagal: '+(j.error||'')); }
-    plan=ds.plan;
-    btnReplay.disabled=false; btnDownload.disabled=false;
-    setStage('Memulai pemutaran…', true);
-    startReplay();
-  }).catch(function(e){
-    setStage('Gagal memuat.', false);
-    setBadge('error');
-    showErr(e.message||String(e));
-    btnReplay.disabled=true;
-  });
-})();
-</script>
-</body>
-</html>`;
+      const html = sharePage({ id, title, og, origin, status, note });
       const body = Buffer.from(html, 'utf8');
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-length': body.length, 'cache-control': 'public, max-age=300' });
       res.end(body);

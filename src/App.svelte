@@ -1,5 +1,6 @@
 <script>
   import { onMount } from 'svelte'
+  import { boom, celebrate } from './lib/fx.js'
 
   let canvas
   let ctx
@@ -26,7 +27,22 @@
   let drawingPrompt = ''
   let jobError = ''
   let jobMsg = ''
+  let notice = ''
   let health = null
+
+  function flashOk(msg) {
+    notice = msg
+    celebrate()
+  }
+
+  function flashErr(msg, { history = false } = {}) {
+    if (history) historyError = msg
+    else {
+      jobError = msg
+      jobMsg = ''
+    }
+    boom()
+  }
 
   function toggleStage(key) {
     analysisKeys = analysisKeys.includes(key)
@@ -51,9 +67,9 @@
     const u = shareUrl(id)
     try {
       await navigator.clipboard.writeText(u)
-      jobMsg = 'Link disalin — bagikan tautannya, penerima bisa memutar ulang gambarnya.'
+      flashOk('Link disalin — bagikan tautannya, penerima bisa memutar ulang gambarnya.')
     } catch {
-      jobMsg = `Salin tautan ini: ${u}`
+      flashOk(`Salin tautan ini: ${u}`)
     }
   }
 
@@ -61,7 +77,7 @@
     // public endpoint — no api key needed
     const r = await fetch(`/api/r/${id}`).catch(() => null)
     if (!r || !r.ok) {
-      jobError = 'Gambar tidak ditemukan — tautan mungkin salah atau sudah dihapus.'
+      flashErr('Gambar tidak ditemukan — tautan mungkin salah atau sudah dihapus.')
       shareLoaded = true
       return
     }
@@ -71,7 +87,7 @@
       jobMsg = 'Memutar ulang gambar dari tautan…'
       startReplay({ id: j.id, plan: ds.plan, replayOnly: true })
     } else {
-      jobError = 'Run ini tidak punya rencana goresan yang bisa diputar ulang.'
+      flashErr('Run ini tidak punya rencana goresan yang bisa diputar ulang.')
     }
     shareLoaded = true
   }
@@ -92,7 +108,7 @@
         const j = await r.json()
         availableStages = (j.stages || []).filter((s) => s.analysis)
       }
-      await loadHistory()
+      await loadHistory({ fx: false })
     } catch {
       // backend unreachable — UI shows connecting state
     }
@@ -359,8 +375,10 @@
         clearCanvas()
         ctx.drawImage(img, 0, 0, CANVAS_W, CANVAS_H)
         jobMsg = 'Replay finished — now showing the exact saved preview from the database.'
+        celebrate()
       } catch {
         jobMsg = 'Replay finished — the saved drawing is untouched in the database.'
+        celebrate()
       }
       return
     }
@@ -371,8 +389,7 @@
     }).catch(() => null)
     const j = r ? await r.json().catch(() => ({})) : {}
     if (!r || !r.ok) {
-      jobError = `Upload failed: ${(j && j.error) || (r && r.status) || 'server unreachable'}`
-      jobMsg = ''
+      flashErr(`Upload failed: ${(j && j.error) || (r && r.status) || 'server unreachable'}`)
       return
     }
     jobMsg = 'Agents analysing your drawing…'
@@ -384,13 +401,14 @@
   async function runWorkflow() {
     jobError = ''
     jobMsg = ''
+    notice = ''
     const subject = drawingPrompt.trim()
     if (!subject) {
-      jobError = 'Describe what you want the agent to draw first.'
+      flashErr('Describe what you want the agent to draw first.')
       return
     }
     if (!apiKey.trim()) {
-      jobError = 'API key not found in project env — check .env (VITE_DRAW_API_KEY).'
+      flashErr('API key not found in project env — check .env (VITE_DRAW_API_KEY).')
       return
     }
     const stages = [...new Set(['draw', ...analysisKeys])]
@@ -403,14 +421,12 @@
       })
       const j = await r.json().catch(() => ({}))
       if (!r.ok) {
-        jobError = j.error || `Server error (${r.status})`
-        jobMsg = ''
+        flashErr(j.error || `Server error (${r.status})`)
         return
       }
       await pollDraw(j.run_id)
     } catch (e) {
-      jobError = 'Could not reach the server: ' + (e.message || e)
-      jobMsg = ''
+      flashErr('Could not reach the server: ' + (e.message || e))
     }
   }
 
@@ -424,7 +440,7 @@
       const j = await r.json()
       if (j.status === 'error') {
         jobMsg = ''
-        jobError = j.error || 'Drawing agent failed.'
+        flashErr(j.error || 'Drawing agent failed.')
         await loadHistory()
         return
       }
@@ -437,14 +453,14 @@
           return
         }
         jobMsg = ''
-        jobError = 'Agent finished but no stroke plan came back.'
+        flashErr('Agent finished but no stroke plan came back.')
         await loadHistory()
         return
       }
       jobMsg = `Asking the drawing agent… (${Math.round((i + 1) * 1.5)}s elapsed)`
     }
     jobMsg = ''
-    jobError = 'Drawing agent took too long — try again.'
+    flashErr('Drawing agent took too long — try again.')
   }
 
   async function pollRun(id) {
@@ -455,8 +471,11 @@
       if (!r || !r.ok) continue
       const j = await r.json()
       if (j.status === 'done' || j.status === 'error') {
-        if (j.status === 'error') jobError = j.error || 'Analysis failed.'
-        jobMsg = j.status === 'done' ? 'Done — saved to the database.' : ''
+        if (j.status === 'error') flashErr(j.error || 'Analysis failed.')
+        else {
+          jobMsg = 'Done — saved to the database.'
+          celebrate()
+        }
         await loadHistory()
         const rr = await api(`/api/runs/${id}`).catch(() => null)
         if (rr && rr.ok) expandedRun = await rr.json()
@@ -470,23 +489,27 @@
           : `Agents analysing… (${nDone}/${st.length} done)`
     }
     jobMsg = ''
-    jobError = 'Analysis took too long — the run is saved, check history.'
+    flashErr('Analysis took too long — the run is saved, check history.')
   }
 
   // ================= history / gallery =================
 
-  async function loadHistory() {
+  async function loadHistory({ fx = true } = {}) {
     historyError = ''
     try {
       const r = await api('/api/runs?limit=24')
       const j = await r.json().catch(() => ({}))
       if (!r.ok) {
-        historyError = j.error || `History failed (${r.status})`
+        const msg = j.error || `History failed (${r.status})`
+        if (fx) flashErr(msg, { history: true })
+        else historyError = msg
         return
       }
       history = j.runs || []
     } catch (e) {
-      historyError = 'Could not load history: ' + (e.message || e)
+      const msg = 'Could not load history: ' + (e.message || e)
+      if (fx) flashErr(msg, { history: true })
+      else historyError = msg
     }
   }
 
@@ -499,9 +522,9 @@
       const r = await api(`/api/runs/${id}`)
       const j = await r.json().catch(() => ({}))
       if (r.ok) expandedRun = j
-      else historyError = j.error || 'Could not open run.'
+      else flashErr(j.error || 'Could not open run.', { history: true })
     } catch (e) {
-      historyError = 'Could not open run: ' + (e.message || e)
+      flashErr('Could not open run: ' + (e.message || e), { history: true })
     }
   }
 
@@ -515,7 +538,7 @@
       startReplay({ id: j.id, plan: ds.plan, replayOnly: true })
       jobMsg = 'Replaying saved run on the canvas…'
     } else {
-      jobMsg = 'This run has no replayable plan.'
+      flashErr('This run has no replayable plan.')
     }
   }
 
@@ -525,13 +548,14 @@
       const r = await api(`/api/runs/${id}`, { method: 'DELETE' })
       if (r.ok) {
         if (expandedRun && expandedRun.id === id) expandedRun = null
-        await loadHistory()
+        await loadHistory({ fx: false })
+        flashOk('Run dihapus.')
       } else {
         const j = await r.json().catch(() => ({}))
-        historyError = j.error || 'Delete failed.'
+        flashErr(j.error || 'Delete failed.', { history: true })
       }
     } catch (e) {
-      historyError = 'Delete failed: ' + (e.message || e)
+      flashErr('Delete failed: ' + (e.message || e), { history: true })
     }
     deleting = ''
   }
@@ -555,22 +579,6 @@
     return replaying || (!!jobMsg && !replayDone && !paused)
   }
 
-  function statusBadge(status) {
-    // map run/stage status to IDDS badge modifiers
-    switch (status) {
-      case 'done':
-        return 'ina-badge--soft ina-badge--success'
-      case 'error':
-        return 'ina-badge--soft ina-badge--error'
-      case 'running':
-        return 'ina-badge--soft ina-badge--warning'
-      case 'rendering':
-        return 'ina-badge--soft ina-badge--info'
-      default:
-        return 'ina-badge--soft ina-badge--neutral'
-    }
-  }
-
   onMount(() => {
     ctx = canvas.getContext('2d')
     setupCanvas()
@@ -592,17 +600,16 @@
 </script>
 
 <svelte:head>
-  <title>Drawing Agents · INA Digital</title>
+  <title>Drawing Agents</title>
 </svelte:head>
 
-<div class="govbar">
-  <div class="govbar__inner">
-    <div class="govbar__mark" aria-hidden="true">IA</div>
-    <div>
-      <h1 class="govbar__title">Drawing Agents</h1>
-      <p class="govbar__sub">Layanan gambar berbasis agen · INA Digital Design System</p>
-    </div>
-    <div class="govbar__status">
+<div class="shell">
+  <header class="topbar">
+    <a class="brand" href="/">
+      <span class="brand__mark" aria-hidden="true"></span>
+      <span class="brand__name">Drawing Agents</span>
+    </a>
+    <div class="topbar__status" aria-live="polite">
       {#if health}
         <span class="dot ok"></span>
         <span>{health.running} running · {health.queued} queued</span>
@@ -611,169 +618,126 @@
         <span>connecting…</span>
       {/if}
     </div>
-  </div>
-</div>
+  </header>
 
-<main class="page">
-  {#if shareRunId}
-    <div class="ina-alert ina-alert--info" style="margin-bottom:12px">
-      <div class="ina-alert__text-section">
-        <p class="ina-alert__title">Tautan berbagi: {shareRunId}</p>
-        <p class="ina-alert__description">Gambar ini bisa diputar ulang — kanvas akan menggambarnya kembali pena demi pena untuk siapa pun yang membuka tautan · <a href="/" style="text-decoration:underline">Kembali ke kanvas</a></p>
+  <main class="workspace">
+    {#if shareRunId}
+      <div class="banner">
+        <div>
+          <strong>Shared run</strong>
+          <span>{shareRunId}</span>
+        </div>
+        <p>
+          Replay pena demi pena untuk siapa pun yang membuka tautan.
+          <a href="/">Kembali ke kanvas</a>
+        </p>
       </div>
-    </div>
-  {/if}
-  <div class="page-head">
-    <h1>Kanvas Agen</h1>
-    <p>
-      Anda menulis perintah, agen Hermes menyusun rencana goresan vektor, dan kanvas menggambarnya
-      sendiri seperti pena yang bergerak. Setiap hasil tersimpan di database di mesin ini.
-    </p>
-  </div>
+    {/if}
 
-  <div class="grid">
-    <!-- Canvas (agent-driven) -->
-    <section class="ina-card">
-      <div class="ina-card__content">
-        <h2 class="ina-card__title">Kanvas <span class="ina-badge ina-badge--sm ina-badge--soft ina-badge--info">agen</span></h2>
-        <div class="stage-line">
-          {#if replaying}
-            <span class="ina-spinner"><span class="ina-spinner__element ina-spinner__element--size-xs ina-spinner__element--border-thin ina-spinner__element--color-primary"></span></span>
-            <span>{paused ? 'Dijeda — klik Lanjut' : 'Agen sedang menggambar…'}</span>
-          {:else if replayDone}
-            <span class="dot ok"></span>
-            <span>Selesai — tersimpan ke database</span>
-          {:else}
-            <span class="dot"></span>
-            <span>Menunggu perintah — agen yang menggambar, bukan Anda</span>
-          {/if}
+    <section class="stage" aria-label="Kanvas agen">
+      {#if replaying || replayDone || busy()}
+        <div class="stage__bar">
+          <div class="stage-line">
+            {#if replaying}
+              <span class="pulse" aria-hidden="true"></span>
+              <span>{paused ? 'Dijeda — klik Lanjut' : 'Agen sedang menggambar…'}</span>
+            {:else if replayDone}
+              <span class="dot ok"></span>
+              <span>Selesai — tersimpan</span>
+            {:else}
+              <span class="pulse" aria-hidden="true"></span>
+              <span>{jobMsg || 'Menyiapkan…'}</span>
+            {/if}
+          </div>
+          <div class="canvas-actions">
+            <button class="btn btn--ghost" onclick={togglePause} disabled={!replaying || replayDone}>
+              {paused ? 'Lanjut' : 'Jeda'}
+            </button>
+            <button class="btn btn--ghost" onclick={() => stopReplay()} disabled={!replaying}>
+              Hentikan
+            </button>
+            <button class="btn btn--ghost" onclick={() => startReplay(replayJob)} disabled={!replayJob || !replayDone}>
+              Putar ulang
+            </button>
+          </div>
         </div>
+      {/if}
+      <div
+        class="stage__frame"
+        class:active={replaying}
+        hidden={!(replaying || replayDone || busy())}
+      >
         <canvas bind:this={canvas} class="draw" class:active={replaying}></canvas>
-        <div class="canvas-actions">
-          <button class="ina-button ina-button--secondary ina-button--sm" onclick={togglePause} disabled={!replaying || replayDone}>
-            {paused ? 'Lanjut' : 'Jeda'}
-          </button>
-          <button class="ina-button ina-button--secondary ina-button--sm" onclick={() => stopReplay()} disabled={!replaying}>
-            Hentikan
-          </button>
-          <button class="ina-button ina-button--secondary ina-button--sm" onclick={() => startReplay(replayJob)} disabled={!replayJob || !replayDone}>
-            Putar ulang
-          </button>
-        </div>
-        <p class="hint">Selama agen menggambar Anda bisa menjeda dan melihat pena bergerak. Tidak ada goresan manual — perintah masuk, gambar keluar.</p>
       </div>
     </section>
 
-    <!-- Agent prompt side -->
-    <section class="ina-card">
-      <div class="ina-card__content">
-        <h2 class="ina-card__title">Perintah menggambar</h2>
-        <p class="ina-card__description">
-          Deskripsikan gambar. Agen Hermes menyusun 30–70 goresan vektor, kanvas memutarnya
-          seperti pena yang menggambar sendiri, lalu agen analisis meninjau hasilnya.
-        </p>
+    <section class="composer" aria-label="Perintah menggambar">
+      <label class="composer__label" for="prompt">Deskripsikan gambar</label>
+      <textarea
+        id="prompt"
+        class="composer__input"
+        rows="3"
+        placeholder="mis. perahu layar kecil di air tenang saat matahari terbenam…"
+        bind:value={drawingPrompt}
+      ></textarea>
 
-        <div class="ina-text-area">
-          <label class="ina-text-area__label" for="prompt">Apa yang harus digambar agen?</label>
-          <div class="ina-text-area__wrapper ina-text-area__wrapper--status-neutral">
-            <textarea
-              id="prompt"
-              class="ina-text-area__input"
-              rows="3"
-              placeholder="mis. perahu layar kecil di air tenang saat matahari terbenam…"
-              bind:value={drawingPrompt}
-            ></textarea>
-          </div>
-        </div>
-
-        <div>
-          <span class="f-label" id="stages-label">Setelah menggambar, jalankan juga:</span>
+      <div class="composer__footer">
+        <div class="composer__stages">
+          <span class="composer__hint" id="stages-label">Analisis</span>
           <div class="stage-picks" role="group" aria-labelledby="stages-label">
             {#each availableStages as s}
               <button
-                class="ina-chip__item ina-chip__item--variant-outline ina-chip__item--size-small"
-                class:ina-chip__item--selected={analysisKeys.includes(s.key)}
+                type="button"
+                class="chip"
+                class:chip--on={analysisKeys.includes(s.key)}
                 onclick={() => toggleStage(s.key)}
               >
                 {s.label}
               </button>
             {:else}
-              <span class="hint">Memuat agen…</span>
+              <span class="composer__hint">Memuat agen…</span>
             {/each}
           </div>
         </div>
-
-        <div>
-          <button class="ina-button ina-button--primary ina-button--md" onclick={runWorkflow} disabled={replaying || (!replayDone && busy())}>
-            {replaying ? (paused ? 'Dijeda…' : 'Agen menggambar…') : 'Minta agen menggambar'}
-          </button>
-        </div>
-
-        {#if jobMsg}
-          <div class="ina-alert ina-alert--info">
-            <div class="ina-alert__text-section">
-              <p class="ina-alert__title">Status</p>
-              <p class="ina-alert__description">{jobMsg}</p>
-            </div>
-          </div>
-        {/if}
-        {#if jobError}
-          <div class="ina-alert ina-alert--critical">
-            <div class="ina-alert__text-section">
-              <p class="ina-alert__title">Kesalahan</p>
-              <p class="ina-alert__description">{jobError}</p>
-            </div>
-          </div>
-        {/if}
-
-        {#if expandedRun}
-          <div class="ina-divider ina-divider--horizontal ina-divider--light"></div>
-          {#each expandedRun.stages as st}
-            <div class="result">
-              <div class="result__head">
-                <strong>{st.label}</strong>
-                <span class="ina-badge ina-badge--sm {statusBadge(st.status)}">{st.status}</span>
-              </div>
-              {#if st.key === 'draw' && st.plan}
-                <pre class="plan">planned {st.plan.count} strokes · subject: {st.plan.subject || '—'}</pre>
-              {:else if st.output}
-                <pre>{st.output}</pre>
-              {/if}
-            </div>
-          {/each}
-        {/if}
+        <button
+          class="btn btn--primary"
+          onclick={runWorkflow}
+          disabled={replaying || (!replayDone && busy())}
+        >
+          {replaying ? (paused ? 'Dijeda…' : 'Menggambar…') : 'Generate'}
+        </button>
       </div>
-    </section>
-  </div>
 
-  <!-- Run history, persisted on this machine -->
-  <section class="ina-card history">
-    <div class="ina-card__content">
-      <div class="history__head">
-        <h2 class="ina-card__title">Riwayat <span class="ina-badge ina-badge--sm ina-badge--soft ina-badge--neutral">{history.length}</span></h2>
-        <button class="ina-button ina-button--secondary ina-button--sm" onclick={loadHistory}>Muat ulang</button>
-      </div>
-      <p class="ina-card__description">
-        Tersimpan di Postgres di mesin ini (database <code>drawing_canvas</code>) — gambar PNG akhir
-        plus semua keluaran agen. Klik satu untuk membukanya.
-      </p>
-      {#if historyError}
-        <div class="ina-alert ina-alert--critical">
-          <div class="ina-alert__text-section">
-            <p class="ina-alert__title">Kesalahan</p>
-            <p class="ina-alert__description">{historyError}</p>
-          </div>
-        </div>
+      {#if notice}
+        <p class="toast toast--info">{notice}</p>
       {/if}
+      {#if jobMsg}
+        <p class="toast toast--info">{jobMsg}</p>
+      {/if}
+      {#if jobError}
+        <p class="toast toast--error">{jobError}</p>
+      {/if}
+    </section>
+
+    <section class="history" aria-label="Riwayat">
+      <div class="history__head">
+        <h2>Riwayat <span class="count">{history.length}</span></h2>
+        <button class="btn btn--ghost" onclick={loadHistory}>Muat ulang</button>
+      </div>
+
+      {#if historyError}
+        <p class="toast toast--error">{historyError}</p>
+      {/if}
+
       {#if history.length === 0}
-        <p class="ina-card__description">Belum ada riwayat — deskripsikan sesuatu dan biarkan agen menggambarnya.</p>
+        <p class="empty">Belum ada riwayat — deskripsikan sesuatu dan biarkan agen menggambarnya.</p>
       {:else}
-        <div class="gallery">
+        <div class="filmstrip">
           {#each history as h}
-            <div class="thumb" class:open={expandedRun && expandedRun.id === h.id}>
+            <article class="thumb" class:open={expandedRun && expandedRun.id === h.id}>
               <button class="thumb__img" onclick={() => openRun(h.id)} aria-label="open run {h.id}">
                 <img src={imgFor(h.id)} alt="drawing for run {h.id}" loading="lazy" />
-                <span class="ina-badge ina-badge--sm {statusBadge(h.status)}">{h.status}</span>
+                <span class="pill">{h.status}</span>
               </button>
               <div class="thumb__meta">
                 <span>{timeAgo(h.created_at)}</span>
@@ -785,7 +749,7 @@
               {#if h.note}
                 <p class="thumb__note">{h.note}</p>
               {/if}
-            </div>
+            </article>
           {/each}
         </div>
 
@@ -793,7 +757,7 @@
           <div class="expanded">
             <div class="result__head">
               <strong>Run {expandedRun.id}</strong>
-              <span class="ina-badge ina-badge--sm {statusBadge(expandedRun.status)}">{expandedRun.status}</span>
+              <span class="pill">{expandedRun.status}</span>
               <button class="linklike" onclick={() => copyShare(expandedRun.id)} title={shareUrl(expandedRun.id)}>Bagikan</button>
               <button class="linklike danger" onclick={() => deleteRun(expandedRun.id)} disabled={deleting === expandedRun.id}>
                 {deleting === expandedRun.id ? '…' : 'Hapus'}
@@ -801,13 +765,13 @@
             </div>
             <img class="big" src={imgFor(expandedRun.id)} alt="drawing for run {expandedRun.id}" />
             {#if expandedRun.note}
-              <p class="ina-card__description">Perintah: {expandedRun.note}</p>
+              <p class="expanded__note">Perintah: {expandedRun.note}</p>
             {/if}
             {#each expandedRun.stages as st}
               <div class="result">
                 <div class="result__head">
                   <strong>{st.label}</strong>
-                  <span class="ina-badge ina-badge--sm {statusBadge(st.status)}">{st.status}</span>
+                  <span class="pill">{st.status}</span>
                 </div>
                 {#if st.key === 'draw' && st.plan}
                   <pre class="plan">planned {st.plan.count} strokes · {st.plan.subject || ''}</pre>
@@ -819,13 +783,11 @@
           </div>
         {/if}
       {/if}
-    </div>
-  </section>
-</main>
+    </section>
+  </main>
 
-<footer class="govfoot">
-  <div class="govfoot__inner">
-    <p><strong>Drawing Agents</strong> · dibangun dengan INA Digital Design System</p>
-    <p>Backend Hermes · Postgres <code>drawing_canvas</code> · draw.corklab.xyz</p>
-  </div>
-</footer>
+  <footer class="foot">
+    <span>Drawing Agents</span>
+    <span>Hermes · Postgres · draw.corklab.xyz</span>
+  </footer>
+</div>
