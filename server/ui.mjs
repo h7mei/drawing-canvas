@@ -149,7 +149,7 @@ canvas.draw,canvas.replay{
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
 `;
 
-function documentShell({ title, headExtra = '', body }) {
+function documentShell({ title, headExtra = '', body, extraCss = '' }) {
   return `<!doctype html>
 <html lang="id">
 <head>
@@ -158,7 +158,7 @@ function documentShell({ title, headExtra = '', body }) {
 <title>${title}</title>
 ${FONT_LINKS}
 ${headExtra}
-<style>${THEME_CSS}</style>
+<style>${THEME_CSS}${extraCss}</style>
 </head>
 <body>
 ${body}
@@ -196,51 +196,96 @@ export function notFoundPage(pathname = '/') {
   return documentShell({ title: '404 — Drawing Agents', body });
 }
 
-/** Independent share/replay page — same chrome as the SPA. */
+const SHARE_CSS = `
+html,body{height:100%;overflow:hidden}
+body.share-page{
+  background:#0a0a0a;
+  background-attachment:scroll;
+}
+body.share-page::before{display:none}
+.shell--share{
+  min-height:100dvh;height:100dvh;padding:0;margin:0;
+  display:flex;flex-direction:column;
+}
+.share-stage{
+  position:relative;flex:1;width:100%;height:100%;min-height:0;
+  display:flex;align-items:center;justify-content:center;
+}
+.shell--share .stage__frame{
+  position:absolute;inset:0;margin:0;padding:0;border:none;border-radius:0;
+  background:#0a0a0a;box-shadow:none;backdrop-filter:none;
+  display:flex;align-items:center;justify-content:center;
+}
+.shell--share .stage__frame.active{
+  border:none;box-shadow:none;
+}
+.shell--share canvas.draw,.shell--share canvas.replay{
+  width:100vw !important;height:100dvh !important;max-width:none !important;max-height:none !important;
+  aspect-ratio:auto !important;border:none !important;border-radius:0 !important;
+  background:#fff;
+}
+.share-hud{
+  position:fixed;z-index:3;top:0;left:0;right:0;
+  display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;
+  padding:14px 16px;
+  background:linear-gradient(180deg,rgba(0,0,0,.55) 0%,rgba(0,0,0,.2) 70%,transparent 100%);
+  pointer-events:none;
+}
+.share-hud .stage-line{color:rgba(255,255,255,.88);pointer-events:none}
+.share-hud .actions{pointer-events:auto}
+.share-hud .btn{
+  background:rgba(255,255,255,.12);border-color:rgba(255,255,255,.28);color:#fff;
+  backdrop-filter:blur(10px);
+}
+.share-hud .btn:not(:disabled):hover{
+  background:rgba(255,255,255,.22);border-color:rgba(255,255,255,.55);
+}
+.share-err{
+  position:fixed;z-index:4;left:50%;bottom:24px;transform:translateX(-50%);
+  max-width:min(520px,calc(100vw - 32px));margin:0;
+  background:rgba(215,38,61,.92);color:#fff;border:none;
+}
+@media(max-width:640px){
+  .share-hud{
+    top:auto;bottom:0;
+    padding:12px 12px calc(12px + env(safe-area-inset-bottom,0px));
+    background:linear-gradient(0deg,rgba(0,0,0,.6) 0%,rgba(0,0,0,.25) 70%,transparent 100%);
+  }
+  .share-hud .actions{width:100%;justify-content:stretch}
+  .share-hud .actions .btn{flex:1 1 0}
+  .share-err{bottom:auto;top:24px}
+}
+`;
+
+/** Independent share/replay page — fullscreen canvas, no chrome. */
 export function sharePage({ id, title, og, origin, status, note }) {
   const safeId = esc(id);
   const shareUrl = `${esc(origin)}/r/${safeId}`;
-  const body = `<div class="shell">
-  ${topbar(`<span class="dot ok"></span><span>Pemutaran berbagi</span>`)}
-  <main class="workspace">
-    <section class="stage" aria-label="Kanvas berbagi">
-      <div class="stage__bar">
-        <div class="stage-line" id="stage">
-          <span class="pulse" id="stagePulse" aria-hidden="true"></span>
-          <span id="stageText">Memuat gambar…</span>
-        </div>
-        <div class="canvas-actions actions">
-          <button class="btn btn--ghost" id="btnPause" disabled>Jeda</button>
-          <button class="btn btn--ghost" id="btnReplay" disabled>Putar ulang</button>
-          <button class="btn btn--ghost" id="btnDownload" disabled>Unduh PNG</button>
-        </div>
+  const body = `<div class="shell shell--share">
+  <main class="share-stage" aria-label="Kanvas berbagi">
+    <div class="share-hud">
+      <div class="stage-line" id="stage">
+        <span class="pulse" id="stagePulse" aria-hidden="true"></span>
+        <span id="stageText">Memuat gambar…</span>
       </div>
-      <div class="stage__frame" id="frame">
-        <canvas id="cv" class="draw replay" width="960" height="600" aria-label="replay canvas"></canvas>
+      <div class="canvas-actions actions">
+        <button class="btn btn--ghost" id="btnPause" disabled>Jeda</button>
+        <button class="btn btn--ghost" id="btnReplay" disabled>Putar ulang</button>
+        <button class="btn btn--ghost" id="btnDownload" disabled>Unduh PNG</button>
       </div>
-    </section>
-
-    <section class="composer" aria-label="Detail berbagi">
-      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        <span class="composer__label">Gambar berbagi</span>
-        <span class="badge" id="badge">${esc(status || 'memuat…')}</span>
-        <span class="composer__hint" id="rid">${safeId}</span>
-      </div>
-      <p class="meta" id="promptLine" style="display:none"></p>
-      <div class="sharebar">
-        <input id="shareInput" readonly value="${shareUrl}" aria-label="share link"/>
-        <button class="btn btn--ghost" id="btnCopy">Salin tautan</button>
-        <a class="btn btn--primary" href="/">Buka kanvas</a>
-      </div>
-      <p class="hint">Pemutaran pena demi pena — tanpa login. Hasil akhir sama dengan pratinjau tersimpan.</p>
-      <div id="err" class="err" style="display:none"></div>
-    </section>
+    </div>
+    <div class="stage__frame" id="frame">
+      <canvas id="cv" class="draw replay" width="960" height="600" aria-label="replay canvas"></canvas>
+    </div>
+    <div id="err" class="err share-err" style="display:none"></div>
   </main>
-  <footer class="foot"><span>Drawing Agents</span> · <a href="/">draw.corklab.xyz</a></footer>
+  <p id="promptLine" hidden></p>
+  <input id="shareInput" type="hidden" value="${shareUrl}"/>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.4/dist/confetti.browser.min.js"></script>
 <script>
 (function(){
+  document.body.classList.add('share-page');
   function celebrate(){
     if(window.matchMedia('(prefers-reduced-motion: reduce)').matches || !window.confetti) return;
     var colors=['#1ec8a5','#ffe650','#4aa3e8','#0a0a0a','#ffffff'];
@@ -261,23 +306,16 @@ export function sharePage({ id, title, og, origin, status, note }) {
   const frame=document.getElementById('frame');
   const stageText=document.getElementById('stageText');
   const stagePulse=document.getElementById('stagePulse');
-  const badge=document.getElementById('badge');
   const errBox=document.getElementById('err');
   const btnReplay=document.getElementById('btnReplay');
   const btnPause=document.getElementById('btnPause');
   const btnDownload=document.getElementById('btnDownload');
-  const btnCopy=document.getElementById('btnCopy');
-  const shareInput=document.getElementById('shareInput');
   const promptLine=document.getElementById('promptLine');
   let plan=null, imageReady=false;
 
   function setStage(t, spin){
     stageText.textContent=t;
     if(stagePulse) stagePulse.style.display = spin ? '' : 'none';
-  }
-  function setBadge(s){
-    badge.textContent=s;
-    badge.className='badge '+(s==='done'?'badge--done':s==='error'?'badge--error':(s==='running'||s==='rendering')?'badge--running':'');
   }
   function showErr(m){errBox.textContent=m; errBox.style.display='';}
   function clear(){ctx.fillStyle='#ffffff';ctx.fillRect(0,0,CANVAS_W,CANVAS_H)}
@@ -324,13 +362,13 @@ export function sharePage({ id, title, og, origin, status, note }) {
     replaying=true; paused=false; strokeIdx=0; live=null; done=false;
     btnReplay.disabled=true; btnPause.disabled=false; btnPause.textContent='Jeda';
     setActive(true);
-    clear(); setStage('Menggambar… 0%', true); setBadge('running');
+    clear(); setStage('Menggambar… 0%', true);
     lastT=performance.now();
-    timer=requestAnimationFrame(frame);
+    timer=requestAnimationFrame(tick);
   }
-  function frame(ts){
+  function tick(ts){
     if(!replaying) return;
-    if(paused){ lastT=ts; timer=requestAnimationFrame(frame); return; }
+    if(paused){ lastT=ts; timer=requestAnimationFrame(tick); return; }
     var strokes=plan.strokes;
     if(!live){
       while(strokeIdx<strokes.length){
@@ -360,7 +398,7 @@ export function sharePage({ id, title, og, origin, status, note }) {
       strokeIdx++; live=null;
       updateProgress(strokeIdx/strokes.length);
     }
-    timer=requestAnimationFrame(frame);
+    timer=requestAnimationFrame(tick);
   }
   async function finish(ok){
     done=true; replaying=false; live=null; cancelAnimationFrame(timer); timer=null;
@@ -375,7 +413,6 @@ export function sharePage({ id, title, og, origin, status, note }) {
       }catch(e){
         setStage('Selesai — menampilkan hasil render penuh.', false);
       }
-      setBadge('done');
       btnReplay.disabled=false; btnPause.disabled=true; btnPause.textContent='Jeda';
       btnDownload.disabled=false; imageReady=true;
       celebrate();
@@ -394,18 +431,13 @@ export function sharePage({ id, title, og, origin, status, note }) {
   btnDownload.addEventListener('click', function(){
     var a=document.createElement('a'); a.href=cv.toDataURL('image/png'); a.download='drawing-'+id+'.png'; a.click();
   });
-  btnCopy.addEventListener('click', async function(){
-    try{ await navigator.clipboard.writeText(shareInput.value); btnCopy.textContent='Tersalin!'; setTimeout(function(){btnCopy.textContent='Salin tautan'},1500);}catch(e){ shareInput.select(); document.execCommand('copy');}
-  });
-  shareInput.addEventListener('click', function(){ this.select(); });
 
   clear();
   fetch('/api/r/'+id).then(function(r){
     if(!r.ok) throw new Error('Gambar tidak ditemukan ('+r.status+') — tautan salah atau sudah dihapus.');
     return r.json();
   }).then(function(j){
-    if(j.note){ promptLine.textContent='Perintah: '+j.note; promptLine.style.display=''; document.title = j.note.slice(0,80)+' — Drawing Agents'; }
-    setBadge(j.status||'');
+    if(j.note){ if(promptLine) promptLine.textContent='Perintah: '+j.note; document.title = j.note.slice(0,80)+' — Drawing Agents'; }
     var ds=(j.stages||[]).find(function(s){return s.key==='draw'});
     if(!ds || !ds.plan || !ds.plan.strokes){ throw new Error('Run ini tidak punya rencana goresan yang bisa diputar ulang. Status: '+(j.status||'')); }
     if(j.status==='error'){ showErr('Run ini gagal: '+(j.error||'')); }
@@ -415,12 +447,16 @@ export function sharePage({ id, title, og, origin, status, note }) {
     startReplay();
   }).catch(function(e){
     setStage('Gagal memuat.', false);
-    setBadge('error');
     showErr(e.message||String(e));
     btnReplay.disabled=true;
     boom();
   });
 })();
 </script>`;
-  return documentShell({ title, headExtra: og, body });
+  return documentShell({
+    title,
+    headExtra: og || '',
+    extraCss: SHARE_CSS,
+    body,
+  });
 }
